@@ -190,8 +190,8 @@ class CPUMonitor():
                 return diag_vals, diag_msgs, diag_level
 
             tmp = stdout.strip()
-            if unicode(tmp).isnumeric():
-                temp = float(tmp) / 1000
+            if unicode(tmp).isnumeric() or (tmp[0] == '-' and unicode(tmp[1:]).isnumeric()):
+                temp = float(tmp.replace('\U00002013', '-')) / 1000
                 diag_vals.append(KeyValue(key = 'Core %d Temperature' % index, value = str(temp)+"DegC"))
 
                 if temp >= self._cpu_temp_warn:
@@ -213,7 +213,7 @@ class CPUMonitor():
         lvl = DiagnosticStatus.OK
 
         try:
-            p = subprocess.Popen('cat /proc/cpuinfo | grep MHz',
+            p = subprocess.Popen('cat /proc/cpuinfo | grep -e MHz -e MIPS',
                                 stdout = subprocess.PIPE,
                                 stderr = subprocess.PIPE, shell = True)
             stdout, stderr = p.communicate()
@@ -292,7 +292,9 @@ class CPUMonitor():
         load_dict = { 0: 'OK', 1: 'High Load', 2: 'Error' }
 
         try:
-            p = subprocess.Popen('mpstat -P ALL 1 1',
+            command = 'mpstat -P ALL 1 1|sed "1,2d"|sed "2d"'
+            command += '|sed -n "1,%d p"' % (self._num_cores + 1)
+            p = subprocess.Popen(command,
                                 stdout = subprocess.PIPE,
                                 stderr = subprocess.PIPE, shell = True)
             stdout, stderr = p.communicate()
@@ -310,44 +312,51 @@ class CPUMonitor():
             # Check which column '%idle' is, #4539
             # mpstat output changed between 8.06 and 8.1
             rows = stdout.split('\n')
-            col_names = rows[2].split()
-            idle_col = -1 if (len(col_names) > 2 and col_names[-1] == '%idle') else -2
+            cpu_name_col = 0
+            user_col = 0
+            nice_col = 0
+            sys_col = 0
+            idle_col = 0
+            for index, tag in enumerate(rows[0].split()):
+                if tag == 'CPU':
+                    cpu_name_col = index
+                elif tag == '%usr':
+                    user_col = index
+                elif tag == '%nice':
+                    nice_col = index
+                elif tag == '%sys':
+                    sys_col = index
+                elif tag == '%idle':
+                    idle_col = index
+                    break
 
             num_cores = 0
-            cores_loaded = 0
+            usage_avg = 0
             for index, row in enumerate(stdout.split('\n')):
-                if index < 3:
+                if index < 1:
                     continue
-
-                # Skip row containing 'all' data
-                if row.find('all') > -1:
-                    continue
-
                 lst = row.split()
-                if len(lst) < 8:
+                if len(lst) < 2:
                     continue
 
-                ## Ignore 'Average: ...' data
-                if lst[0].startswith('Average'):
-                    continue
-
-                cpu_name = '%d' % (num_cores)
+                cpu_name = lst[cpu_name_col]
                 idle = lst[idle_col]
-                user = lst[3]
-                nice = lst[4]
-                system = lst[5]
+                user = lst[user_col]
+                nice = lst[nice_col]
+                system = lst[sys_col]
 
                 core_level = 0
                 usage = (float(user)+float(nice))*1e-2
                 if usage > 10.0: # wrong reading, use old reading instead
-                    rospy.logwarn('Read CPU usage of %f percent. Reverting to previous reading of %f percent'%(usage, self._usage_old))
+                    rospy.logwarn('Read CPU usage of %f percent. Reverting to previous reading of %f percent', usage, self._usage_old)
                     usage = self._usage_old
                 self._usage_old = usage
 
+                usage_avg += usage
+
                 if usage >= self._cpu_load_warn:
-                    cores_loaded += 1
                     core_level = DiagnosticStatus.WARN
-                elif usage >= self._cpu_load_error:
+                if usage >= self._cpu_load_error:
                     core_level = DiagnosticStatus.ERROR
 
                 vals.append(KeyValue(key = 'Core %s Status' % cpu_name, value = load_dict[core_level]))
@@ -359,12 +368,14 @@ class CPUMonitor():
                 num_cores += 1
 
             # Warn for high load only if we have <= 2 cores that aren't loaded
-            if num_cores - cores_loaded <= 2 and num_cores > 2:
+            usage_avg /= max(num_cores, 1)
+            if usage_avg >= self._cpu_load_warn:
                 mp_level = DiagnosticStatus.WARN
+            if usage_avg >= self._cpu_load_error:
+                mp_level = DiagnosticStatus.ERROR
 
             if not self._num_cores:
               self._num_cores = num_cores
-
             # Check the number of cores if self._num_cores > 0, #4850
             if self._num_cores != num_cores:
                 mp_level = DiagnosticStatus.ERROR
@@ -385,7 +396,7 @@ class CPUMonitor():
     def get_core_temp_names(self):
         temp_vals = []
         try:
-            p = subprocess.Popen('find /sys/devices -name temp1_input',
+            p = subprocess.Popen('find /sys/devices/platform -name temp*_input',
                                 stdout = subprocess.PIPE,
                                 stderr = subprocess.PIPE, shell = True)
             stdout, stderr = p.communicate()
