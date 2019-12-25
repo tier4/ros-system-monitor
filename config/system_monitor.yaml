@@ -1,11 +1,10 @@
 cpu_monitor:
-  check_core_temps: true
   cpu_load_warn:  0.9
   cpu_load_error: 1.0
   cpu_load1_warn: 0.9
   cpu_load5_warn: 0.8
-  cpu_temp_warn: 85.0
-  cpu_temp_error: 90.0
+  cpu_temp_warn: 95.0
+  cpu_temp_error: 100.0
 hdd_monitor:
   no_hdd_temp: true
   no_hdd_temp_warn: false

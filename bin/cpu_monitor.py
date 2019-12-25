@@ -61,6 +61,7 @@ cpu_load1_warn = 0.9
 cpu_load5_warn = 0.8
 cpu_temp_warn = 85.0
 cpu_temp_error = 90.0
+cpu_throttling_error = 1000000
 
 stat_dict = { 0: 'OK', 1: 'Warning', 2: 'Error' }
 
@@ -96,19 +97,19 @@ class CPUMonitor():
 
         self._mutex = threading.Lock()
 
-        self._check_core_temps = rospy.get_param('~check_core_temps', True)
-
         self._cpu_load_warn = rospy.get_param('~cpu_load_warn', cpu_load_warn)
         self._cpu_load_error = rospy.get_param('~cpu_load_error', cpu_load_error)
         self._cpu_load1_warn = rospy.get_param('~cpu_load1_warn', cpu_load1_warn)
         self._cpu_load5_warn = rospy.get_param('~cpu_load5_warn', cpu_load5_warn)
         self._cpu_temp_warn = rospy.get_param('~cpu_temp_warn', cpu_temp_warn)
         self._cpu_temp_error = rospy.get_param('~cpu_temp_error', cpu_temp_error)
+        self._cpu_throttling_error = rospy.get_param('~cpu_throttling_error', cpu_throttling_error)
 
         self._num_cores = multiprocessing.cpu_count()
 
         self._temps_timer = None
         self._usage_timer = None
+        self._freq_timer = None
         
         # Get temp_input files
         self._temp_vals = self.get_core_temp_names()
@@ -130,8 +131,17 @@ class CPUMonitor():
         self._usage_stat.values = [ KeyValue(key = 'Update Status', value = 'No Data' ),
                                     KeyValue(key = 'Time Since Last Update', value = 'N/A') ]
 
+        self._freq_stat = DiagnosticStatus()
+        self._freq_stat.name = 'CPU Frequency (%s)' % diag_hostname
+        self._freq_stat.level = 1
+        self._freq_stat.hardware_id = hostname
+        self._freq_stat.message = 'No Data'
+        self._freq_stat.values = [ KeyValue(key = 'Update Status', value = 'No Data' ),
+                                   KeyValue(key = 'Time Since Last Update', value = 'N/A') ]
+
         self._last_temp_time = 0
         self._last_usage_time = 0
+        self._last_freq_time = 0
         self._last_publish_time = 0
 
         self._usage_old = 0
@@ -141,6 +151,7 @@ class CPUMonitor():
         # Start checking everything
         self.check_temps()
         self.check_usage()
+        self.check_freq()
 
     # Restart temperature checking 
     def _restart_temp_check(self):
@@ -162,6 +173,9 @@ class CPUMonitor():
 
         if self._usage_timer:
             self._usage_timer.cancel()
+
+        if self._freq_timer:
+            self._freq_timer.cancel()
 
     ##\brief Check CPU core temps
     ##
@@ -194,12 +208,12 @@ class CPUMonitor():
                 temp = float(tmp.replace('\U00002013', '-')) / 1000
                 diag_vals.append(KeyValue(key = 'Core %d Temperature' % index, value = str(temp)+"DegC"))
 
-                if temp >= self._cpu_temp_warn:
-                    diag_level = max(diag_level, DiagnosticStatus.WARN)
-                    diag_msgs.append('Warm')
-                elif temp >= self._cpu_temp_error:
+                if temp >= self._cpu_temp_error:
                     diag_level = max(diag_level, DiagnosticStatus.ERROR)
                     diag_msgs.append('Hot')
+                elif temp >= self._cpu_temp_warn:
+                    diag_level = max(diag_level, DiagnosticStatus.WARN)
+                    diag_msgs.append('Warm')
             else:
                 diag_level = max(diag_level, DiagnosticStatus.ERROR) # Error if not numeric value
                 diag_vals.append(KeyValue(key = 'Core %s Temperature' % index, value = tmp))
@@ -391,12 +405,51 @@ class CPUMonitor():
 
         return mp_level, load_dict[mp_level], vals
 
+    ## Checks clock speed from reading from CPU info
+    def check_cur_freq(self):
+        vals = []
+        msgs = []
+        lvl = DiagnosticStatus.OK
+
+        try:
+            p = subprocess.Popen('cat /sys/devices/system/cpu/cpufreq/policy*/scaling_cur_freq',
+                                stdout = subprocess.PIPE,
+                                stderr = subprocess.PIPE, shell = True)
+            stdout, stderr = p.communicate()
+            retcode = p.returncode
+
+            if retcode != 0:
+                lvl = DiagnosticStatus.ERROR
+                msgs = [ 'Clock speed error' ]
+                vals = [ KeyValue(key = 'Clock speed error', value = stderr),
+                        KeyValue(key = 'Output', value = stdout) ]
+
+                return (vals, msgs, lvl)
+
+            for index, ln in enumerate(stdout.split('\n')):
+                tmp = ln.strip()
+                if unicode(tmp).isnumeric():
+                    temp = int(ln)
+                    vals.append(KeyValue(key = 'Core %d Clock' % index, value = str(tmp)+"Hz"))
+
+                    if temp < self._cpu_throttling_error:
+                        lvl = max(lvl, DiagnosticStatus.ERROR)
+                        msgs.append('Throttling')
+
+        except Exception, e:
+            rospy.logerr(traceback.format_exc())
+            lvl = DiagnosticStatus.ERROR
+            msgs.append('Exception')
+            vals.append(KeyValue(key = 'Exception', value = traceback.format_exc()))
+
+        return vals, msgs, lvl
+
     ## Returns names for core temperature files
     ## Returns list of names, each name can be read like file
     def get_core_temp_names(self):
         temp_vals = []
         try:
-            p = subprocess.Popen('find /sys/devices/platform -name temp*_input',
+            p = subprocess.Popen('find /sys/devices/platform -name temp*_input | sort',
                                 stdout = subprocess.PIPE,
                                 stderr = subprocess.PIPE, shell = True)
             stdout, stderr = p.communicate()
@@ -426,11 +479,10 @@ class CPUMonitor():
         diag_msgs = []
         diag_level = 0
 
-        if self._check_core_temps:
-            core_vals, core_msgs, core_level = self.check_core_temps(self._temp_vals)
-            diag_vals.extend(core_vals)
-            diag_msgs.extend(core_msgs)
-            diag_level = max(diag_level, core_level)
+        core_vals, core_msgs, core_level = self.check_core_temps(self._temp_vals)
+        diag_vals.extend(core_vals)
+        diag_msgs.extend(core_msgs)
+        diag_level = max(diag_level, core_level)
 
         diag_log = set(diag_msgs)
         if len(diag_log) > 0:
@@ -501,16 +553,53 @@ class CPUMonitor():
             else:
                 self.cancel_timers()
 
+    def check_freq(self):
+        if rospy.is_shutdown():
+            with self._mutex:
+                self.cancel_timers()
+            return
+
+        freq_vals = [ KeyValue(key = 'Update Status', value = 'OK' ),
+                      KeyValue(key = 'Time Since Last Update', value = str(0) ) ]
+        freq_msgs = []
+        freq_level = 0
+
+        vals, msgs, level = self.check_cur_freq()
+        freq_vals.extend(vals)
+        freq_msgs.extend(msgs)
+        freq_level = max(freq_level, level)
+
+        diag_log = set(freq_msgs)
+        if len(diag_log) > 0:
+            message = ', '.join(diag_log)
+        else:
+            message = stat_dict[freq_level]
+
+        with self._mutex:
+            self._last_freq_time = rospy.get_time()
+            
+            self._freq_stat.level = freq_level
+            self._freq_stat.message = message
+            self._freq_stat.values = freq_vals
+            
+            if not rospy.is_shutdown():
+                self._freq_timer = threading.Timer(5.0, self.check_freq)
+                self._freq_timer.start()
+            else:
+                self.cancel_timers()
+
     def publish_stats(self):
         with self._mutex:
             # Update everything with last update times
             update_status_stale(self._temp_stat, self._last_temp_time)
             update_status_stale(self._usage_stat, self._last_usage_time)
+            update_status_stale(self._freq_stat, self._last_freq_time)
 
             msg = DiagnosticArray()
             msg.header.stamp = rospy.get_rostime()
             msg.status.append(self._temp_stat)
             msg.status.append(self._usage_stat)
+            msg.status.append(self._freq_stat)
 
             if rospy.get_time() - self._last_publish_time > 0.5:
                 self._diag_pub.publish(msg)
