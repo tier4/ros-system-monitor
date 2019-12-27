@@ -56,11 +56,11 @@ import socket
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 
 cpu_load_warn = 0.9
-cpu_load_error = 1.1
+cpu_load_error = 1.0
 cpu_load1_warn = 0.9
 cpu_load5_warn = 0.8
-cpu_temp_warn = 85.0
-cpu_temp_error = 90.0
+cpu_temp_warn = 95.0
+cpu_temp_error = 100.0
 cpu_throttling_error = 1000000
 
 stat_dict = { 0: 'OK', 1: 'Warning', 2: 'Error' }
