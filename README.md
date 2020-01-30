@@ -149,3 +149,16 @@ reported through the project's issue page.
 
 For additional information of the Robot Operating System (ROS), please refer
 to the official [ROS documentation](http://wiki.ros.org).
+
+## How to specify CPU frequency to detect thermal throttling
+
+Generally, CPU frequency goes down to lower than minimum operating frequency when thermal throttling is detected and slowdown occurs.
+We can know minimum frequency by using lscpu.
+ ```
+ $ lscpu
+ ...
+ CPU min MHz:         800.0000
+ ```
+ Please do not set the minimum operating frequency for 'cpu_throttling_error' to detect thermal throttling.<br>
+ This value should have a little extra range because the frequency sometimes drops just a little bit lower than the minimum frequency in powersave mode.<br>
+ The minimum frequency of our reference platform (Nuvo-7160GC, Intel® Core™ i7-8700) is 800MHz, so the value is set to 750MHz by default.
