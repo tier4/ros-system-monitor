@@ -61,7 +61,7 @@ cpu_load1_warn = 0.9
 cpu_load5_warn = 0.8
 cpu_temp_warn = 90.0
 cpu_temp_error = 95.0
-cpu_throttling_error = 1000000
+cpu_throttling_error = 750000
 
 stat_dict = { 0: 'OK', 1: 'Warning', 2: 'Error' }
 
